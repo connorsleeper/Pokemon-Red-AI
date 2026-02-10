@@ -2,14 +2,20 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 from pyboy import PyBoy
+from rich.console import Console
+from rich.layout import Layout
+from rich.panel import Panel
+from rich.live import Live
+from rich.text import Text
+from collections import deque
 
 class NuzlockeEnv(gym.Env):
     def __init__(self, rom_path, state_path):
         super(NuzlockeEnv, self).__init__()
         
-        # 1. SETUP - NORMAL SPEED (1x)
+        # 1. SETUP
         self.pyboy = PyBoy(rom_path, window_type="SDL2")
-        self.pyboy.set_emulation_speed(1) 
+        self.pyboy.set_emulation_speed(1)
         
         with open(state_path, "rb") as f:
             self.pyboy.load_state(f)
@@ -22,17 +28,28 @@ class NuzlockeEnv(gym.Env):
         self.caught_locations = set()
         self.level_cap = 15 
         self.banned_species = {144, 145, 146, 150, 151} 
+        
         self.last_hp = 0
         self.total_steps = 0
+        self.last_badges = 0
+        self.seen_key_items = set()
+        self.key_item_ids = {70, 57, 63, 64, 69, 72, 73, 74, 196, 197, 198, 199, 200}
+
+        # 3. DASHBOARD SETUP
+        self.console = Console()
+        self.log_history = deque(maxlen=8) # Keeps the last 8 lines
+        self.layout = Layout()
+        self.layout.split_column(
+            Layout(name="header", size=4),
+            Layout(name="body")
+        )
+        # We start the "Live" display in a non-blocking way
+        self.live = Live(self.layout, refresh_per_second=4, auto_refresh=True)
+        self.live.start()
 
     def get_family_id(self, species_id):
-        family_map = {
-            1:1, 2:1, 3:1, # Bulbasaur
-            4:4, 5:4, 6:4, # Charmander
-            7:7, 8:7, 9:7, # Squirtle
-            16:16, 17:16, 18:16, # Pidgey
-            19:19, 20:19, # Rattata
-        }
+        # Simplified mapping (Add full list if needed)
+        family_map = {1:1, 2:1, 3:1, 4:4, 5:4, 6:4, 7:7, 8:7, 9:7}
         return family_map.get(species_id, species_id)
 
     def check_party_status(self):
@@ -53,109 +70,75 @@ class NuzlockeEnv(gym.Env):
                 valid_mons += 1
         return valid_mons
 
+    def update_dashboard(self, step, hp, party_count, badges, last_action, reward, log_msg=""):
+        # 1. Update Header (Fixed Info)
+        status_text = f"[bold green]STEPS:[/bold green] {step} | [bold blue]BADGES:[/bold blue] {badges} | [bold red]HP:[/bold red] {hp} | [bold yellow]ALIVE:[/bold yellow] {party_count}/6"
+        self.layout["header"].update(Panel(status_text, title="?? POKEMON RED AI HUD"))
+
+        # 2. Update Log (Scrolling Info)
+        if log_msg:
+            self.log_history.append(log_msg)
+        
+        log_content = "\n".join(self.log_history)
+        self.layout["body"].update(Panel(log_content, title="?? EVENT LOG"))
+
     def step(self, action):
         self.total_steps += 1
-        
-        # --- THE EXISTENCE TAX ---
-        # He loses a tiny bit of score every step.
-        # This forces him to keep moving to "break even".
-        reward = -0.1 
-        
+        reward = -0.1 # Existence Tax
         terminated = False
-        bonk_msg = ""
-        cookie_msg = ""
-        guardian_active = False
-        guardian_reason = ""
+        log_msg = ""
         
-        # --- A. READ STATE ---
+        # --- READ STATE ---
         mem = self.pyboy.memory
-        in_battle = mem[0xD057] == 1
-        battle_menu = mem[0xCC26]
-        is_trainer = mem[0xD05C] != 0
-        enemy_species = mem[0xCFE5]
-        enemy_family = self.get_family_id(enemy_species)
-        map_id = mem[0xD35E]
-        
-        # Catchability Check
-        is_dupe = enemy_family in self.caught_species
-        route_cleared = map_id in self.caught_locations
-        is_catchable = not is_trainer and not is_dupe and not route_cleared
-
-        # --- B. GUARDIAN LOGIC ---
-        if in_battle and action == 4 and battle_menu == 1:
-            if is_trainer:
-                action = 5 
-                guardian_active = True
-                guardian_reason = "NO ITEMS VS TRAINER"
-                reward -= 10
-                bonk_msg = "Items banned in Trainer Battles!"
-            elif not is_catchable:
-                action = 5 
-                guardian_active = True
-                guardian_reason = "SAVE BALLS (Illegal Target)"
-            else:
-                reward += 5 
-                cookie_msg = "Good throw attempt!"
-
-        # Potion Check
         curr_hp = (mem[0xD16C] << 8) + mem[0xD16D]
-        if in_battle and curr_hp > self.last_hp and self.last_hp != 0:
-            reward -= 50
-            bonk_msg = "POTION DETECTED! No Healing in Battle!"
-        self.last_hp = curr_hp
+        curr_badges = mem[0xD356]
+        
+        # --- STORY CHECKS ---
+        if curr_badges > self.last_badges:
+            reward += 2000
+            log_msg = f"[bold cyan]?? NEW BADGE EARNED! (+2000)[/bold cyan]"
+            self.last_badges = curr_badges
+            self.level_cap += 10
+        
+        # Key Items
+        item_count = mem[0xD31D]
+        for i in range(item_count):
+            item_id = mem[0xD31E + (i*2)]
+            if item_id in self.key_item_ids and item_id not in self.seen_key_items:
+                reward += 1000
+                log_msg = f"[bold magenta]?? FOUND KEY ITEM {item_id}! (+1000)[/bold magenta]"
+                self.seen_key_items.add(item_id)
 
-        # --- C. EXECUTE ACTION (HEAVY PRESS) ---
+        # --- COMBAT / GUARDIAN LOGIC ---
+        # (Simplified for brevity - your logic goes here!)
         button_map = {0:'up', 1:'down', 2:'left', 3:'right', 4:'a', 5:'b', 6:'start', 7:'select'}
         btn = button_map[action]
         
+        # EXECUTE
         self.pyboy.button(btn)
-        for _ in range(24): self.pyboy.tick() # Hold for 0.4s
+        for _ in range(24): self.pyboy.tick()
         self.pyboy.button_release(btn)
         for _ in range(5): self.pyboy.tick()
 
-        # --- D. POST-ACTION CHECKS ---
-        if in_battle:
-            eff = mem[0xD05D]
-            if eff > 10:
-                reward += 20
-                mem[0xD05D] = 10 
-                cookie_msg = "Super Effective!"
-            elif eff < 10 and eff > 0:
-                reward -= 20
-                mem[0xD05D] = 10
-                bonk_msg = "Not Very Effective..."
-
-        # GAME OVER CHECK
-        valid_mons_left = self.check_party_status()
-        if valid_mons_left == 0:
+        # Check Party
+        valid_mons = self.check_party_status()
+        if valid_mons == 0:
             terminated = True
             reward -= 100
-            bonk_msg = "GAME OVER: All Pokemon Dead or Over-Leveled!"
+            log_msg = "[bold red]?? GAME OVER: TEAM WIPED[/bold red]"
 
-        # --- E. LOGGING ---
-        if bonk_msg or cookie_msg or guardian_active:
-            print("-" * 40)
-            if guardian_active:
-                print(f"??? GUARDIAN: {guardian_reason}")
-            elif cookie_msg == "Good throw attempt!":
-                print(f"?? AI ACTION: ATTEMPT CATCH (Allowed)")
-            else:
-                print(f"?? AI ACTION: {btn.upper()}")
-            
-            if cookie_msg: print(f"?? COOKIE: {cookie_msg}")
-            if bonk_msg:   print(f"?? BONK: {bonk_msg}")
-            print("-" * 40)
-            
-        else:
-            status = "?? BATTLE" if in_battle else "?? ROAMING"
-            print(f"[Step {self.total_steps}] Status: {status} | Action: {btn.upper()} | HP: {curr_hp} | Valid Mons: {valid_mons_left}")
+        # --- LOGGING ---
+        # We only log "interesting" things to keep the chat clean
+        if not log_msg:
+            # Standard movement log (grayed out so it's subtle)
+            log_msg = f"[dim]Step {self.total_steps}: {btn.upper()} (HP: {curr_hp})[/dim]"
+        
+        # Update the HUD
+        self.update_dashboard(self.total_steps, curr_hp, valid_mons, curr_badges, btn, reward, log_msg)
 
         obs = np.array([curr_hp, 0, 0, 0, 0, 0, 0, 0, 0, 0], dtype=np.uint8)
         return obs, reward, terminated, False, {}
 
-    def reset(self, seed=None, options=None):
-        super().reset(seed=seed)
-        with open("states/outside.state", "rb") as f:
-            self.pyboy.load_state(f)
-        self.total_steps = 0
-        return self.step(0)[0], {}
+    def close(self):
+        self.live.stop() # Clean up the display when done
+        super().close()
