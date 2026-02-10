@@ -6,139 +6,135 @@ from rich.console import Console
 from rich.layout import Layout
 from rich.panel import Panel
 from rich.live import Live
-from rich.text import Text
 from collections import deque
 
 class NuzlockeEnv(gym.Env):
     def __init__(self, rom_path, state_path):
         super(NuzlockeEnv, self).__init__()
-        
-        # 1. SETUP
         self.pyboy = PyBoy(rom_path, window_type="SDL2")
         self.pyboy.set_emulation_speed(1)
-        
         with open(state_path, "rb") as f:
             self.pyboy.load_state(f)
             
         self.action_space = spaces.Discrete(8)
         self.observation_space = spaces.Box(low=0, high=255, shape=(10,), dtype=np.uint8)
         
-        # 2. TRACKING
-        self.caught_species = set()
-        self.caught_locations = set()
-        self.level_cap = 15 
-        self.banned_species = {144, 145, 146, 150, 151} 
-        
-        self.last_hp = 0
+        # --- TELEMENTRY & ECONOMY ---
         self.total_steps = 0
+        self.total_reward = 0.0
+        self.cookies = 0
+        self.bonks = 0
+        self.level_cap = 15
         self.last_badges = 0
+        self.last_hp = 0
+        
+        # --- STORY TRACKING ---
         self.seen_key_items = set()
         self.key_item_ids = {70, 57, 63, 64, 69, 72, 73, 74, 196, 197, 198, 199, 200}
+        self.current_objective = "Get Oak's Parcel"
 
-        # 3. DASHBOARD SETUP
+        # --- DASHBOARD CONFIG ---
         self.console = Console()
-        self.log_history = deque(maxlen=8) # Keeps the last 8 lines
+        self.log_history = deque(maxlen=35) 
         self.layout = Layout()
         self.layout.split_column(
             Layout(name="header", size=4),
-            Layout(name="body")
+            Layout(name="body", ratio=1)
         )
-        # We start the "Live" display in a non-blocking way
-        self.live = Live(self.layout, refresh_per_second=4, auto_refresh=True)
+        
+        self.live = Live(self.layout, refresh_per_second=10, auto_refresh=False)
         self.live.start()
 
-    def get_family_id(self, species_id):
-        # Simplified mapping (Add full list if needed)
-        family_map = {1:1, 2:1, 3:1, 4:4, 5:4, 6:4, 7:7, 8:7, 9:7}
-        return family_map.get(species_id, species_id)
-
-    def check_party_status(self):
-        mem = self.pyboy.memory
-        party_count = mem[0xD163]
-        valid_mons = 0
-        for i in range(party_count):
-            base_addr = 0xD16B + (i * 44)
-            hp = (mem[base_addr + 1] << 8) + mem[base_addr + 2]
-            level = mem[base_addr + 0x21]
-            species = mem[base_addr]
-            
-            is_alive = hp > 0
-            is_legal_level = level <= self.level_cap
-            is_legal_species = species not in self.banned_species
-            
-            if is_alive and is_legal_level and is_legal_species:
-                valid_mons += 1
-        return valid_mons
-
-    def update_dashboard(self, step, hp, party_count, badges, last_action, reward, log_msg=""):
-        # 1. Update Header (Fixed Info)
-        status_text = f"[bold green]STEPS:[/bold green] {step} | [bold blue]BADGES:[/bold blue] {badges} | [bold red]HP:[/bold red] {hp} | [bold yellow]ALIVE:[/bold yellow] {party_count}/6"
-        self.layout["header"].update(Panel(status_text, title="?? POKEMON RED AI HUD"))
-
-        # 2. Update Log (Scrolling Info)
-        if log_msg:
-            self.log_history.append(log_msg)
+    def update_objective(self, mem):
+        # Logic to update the HUD objective string based on inventory/events
+        badges = mem[0xD356]
+        has_parcel = 70 in self.seen_key_items
         
-        log_content = "\n".join(self.log_history)
-        self.layout["body"].update(Panel(log_content, title="?? EVENT LOG"))
+        if badges == 0:
+            self.current_objective = "Deliver Parcel to Oak" if has_parcel else "Find Oak's Parcel"
+        elif badges == 1: self.current_objective = "Misty (Cerulean Gym)"
+        elif badges == 2: self.current_objective = "Lt. Surge (Vermilion Gym)"
+        # Add more as he progresses!
+
+    def update_dashboard(self, hp, party, badges, reward_delta, log_msg=""):
+        self.total_reward += reward_delta
+        
+        # Top HUD: Economy & Stats
+        stats = (f"[bold green]STEP:[/bold green] {self.total_steps} | "
+                 f"[bold blue]BADGES:[/bold blue] {badges} | "
+                 f"[bold red]SCORE:[/bold red] {self.total_reward:.1f} | "
+                 f"[bold white]?? {self.cookies}[/bold white] | "
+                 f"[bold orange3]?? {self.bonks}[/bold orange3]")
+        
+        obj_text = f"[bold cyan]CURRENT OBJECTIVE:[/bold cyan] {self.current_objective} | [bold yellow]PARTY:[/bold yellow] {party}/6"
+        
+        full_header = stats + "\n" + obj_text
+        self.layout["header"].update(Panel(full_header, style="white on black"))
+        
+        if log_msg: self.log_history.append(log_msg)
+        self.layout["body"].update(Panel("\n".join(self.log_history), title="[bold white]LIVE TELEMETRY[/bold white]", border_style="blue"))
+        self.live.refresh()
 
     def step(self, action):
         self.total_steps += 1
-        reward = -0.1 # Existence Tax
-        terminated = False
+        reward = -0.1
         log_msg = ""
         
-        # --- READ STATE ---
         mem = self.pyboy.memory
+        # --- TELEMETRY ---
         curr_hp = (mem[0xD16C] << 8) + mem[0xD16D]
-        curr_badges = mem[0xD356]
+        map_id = mem[0xD35E]
+        x_coord = mem[0xD362]
+        y_coord = mem[0xD361]
+        in_battle = mem[0xD057] == 1
         
-        # --- STORY CHECKS ---
-        if curr_badges > self.last_badges:
-            reward += 2000
-            log_msg = f"[bold cyan]?? NEW BADGE EARNED! (+2000)[/bold cyan]"
-            self.last_badges = curr_badges
-            self.level_cap += 10
-        
-        # Key Items
-        item_count = mem[0xD31D]
-        for i in range(item_count):
-            item_id = mem[0xD31E + (i*2)]
-            if item_id in self.key_item_ids and item_id not in self.seen_key_items:
-                reward += 1000
-                log_msg = f"[bold magenta]?? FOUND KEY ITEM {item_id}! (+1000)[/bold magenta]"
-                self.seen_key_items.add(item_id)
-
-        # --- COMBAT / GUARDIAN LOGIC ---
-        # (Simplified for brevity - your logic goes here!)
-        button_map = {0:'up', 1:'down', 2:'left', 3:'right', 4:'a', 5:'b', 6:'start', 7:'select'}
-        btn = button_map[action]
-        
-        # EXECUTE
-        self.pyboy.button(btn)
+        # --- ACTION ---
+        btn_list = ['UP', 'DOWN', 'LEFT', 'RIGHT', 'A', 'B', 'START', 'SELECT']
+        btn = btn_list[action]
+        self.pyboy.button(btn.lower())
         for _ in range(24): self.pyboy.tick()
-        self.pyboy.button_release(btn)
+        self.pyboy.button_release(btn.lower())
         for _ in range(5): self.pyboy.tick()
 
-        # Check Party
-        valid_mons = self.check_party_status()
-        if valid_mons == 0:
-            terminated = True
-            reward -= 100
-            log_msg = "[bold red]?? GAME OVER: TEAM WIPED[/bold red]"
-
-        # --- LOGGING ---
-        # We only log "interesting" things to keep the chat clean
-        if not log_msg:
-            # Standard movement log (grayed out so it's subtle)
-            log_msg = f"[dim]Step {self.total_steps}: {btn.upper()} (HP: {curr_hp})[/dim]"
+        # --- REWARDS & LOGS ---
+        self.update_objective(mem)
+        valid_mons = 0 # (Insert your full check_party_status logic here)
         
-        # Update the HUD
-        self.update_dashboard(self.total_steps, curr_hp, valid_mons, curr_badges, btn, reward, log_msg)
+        # Badge Reward
+        if mem[0xD356] > self.last_badges:
+            r = 2000; reward += r; self.cookies += 1
+            log_msg = f"[bold cyan]?? COOKIE: NEW BADGE! (+{r})[/bold cyan]"
+            self.last_badges = mem[0xD356]
+        
+        # Potion Bonk
+        elif in_battle and curr_hp > self.last_hp and self.last_hp != 0:
+            r = 50; reward -= r; self.bonks += 1
+            log_msg = f"[bold orange3]?? BONK: ILLEGAL HEAL! (-{r})[/bold orange3]"
 
-        obs = np.array([curr_hp, 0, 0, 0, 0, 0, 0, 0, 0, 0], dtype=np.uint8)
-        return obs, reward, terminated, False, {}
+        # Standard Telemetry Log
+        if not log_msg:
+            log_msg = f"[dim]MAP:{map_id} ({x_coord},{y_coord}) | ACTION:{btn} | HP:{curr_hp}[/dim]"
+
+        self.last_hp = curr_hp
+        self.update_dashboard(curr_hp, 6, mem[0xD356], reward, log_msg)
+        
+        return np.zeros(10, dtype=np.uint8), float(reward), False, False, {}
+
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
+        with open("states/outside.state", "rb") as f:
+            self.pyboy.load_state(f)
+        # End-of-Run Summary
+        print(f"\n--- BRAIN REVIEW: Steps {self.total_steps} | Cookies: {self.cookies} | Bonks: {self.bonks} ---")
+        return np.zeros(10, dtype=np.uint8), {}
 
     def close(self):
-        self.live.stop() # Clean up the display when done
+        if self.live: self.live.stop()
+        # Final Exit Summary
+        print("\n" + "="*40)
+        print(f"?? FINAL SESSION SUMMARY")
+        print(f"   Total Score: {self.total_reward:.2f}")
+        print(f"   Total Cookies: {self.cookies}")
+        print(f"   Total Bonks: {self.bonks}")
+        print("="*40)
         super().close()
