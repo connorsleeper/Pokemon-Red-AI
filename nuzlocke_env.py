@@ -36,38 +36,31 @@ class NuzlockeEnv(gym.Env):
         return family_map.get(species_id, species_id)
 
     def check_party_status(self):
-        """Scans the entire party for a Game Over condition."""
         mem = self.pyboy.memory
         party_count = mem[0xD163]
         valid_mons = 0
-        
-        # Loop through each party member
         for i in range(party_count):
-            # In Gen 1, Party Structs start at 0xD16B. Each is 44 bytes.
             base_addr = 0xD16B + (i * 44)
-            
-            # Read HP (Bytes 1 and 2)
             hp = (mem[base_addr + 1] << 8) + mem[base_addr + 2]
-            
-            # Read Level (Byte 33 -> Offset 0x21)
             level = mem[base_addr + 0x21]
-            
-            # Read Species (Byte 0)
             species = mem[base_addr]
-
-            # Check if this specific mon is usable
+            
             is_alive = hp > 0
             is_legal_level = level <= self.level_cap
             is_legal_species = species not in self.banned_species
             
             if is_alive and is_legal_level and is_legal_species:
                 valid_mons += 1
-                
         return valid_mons
 
     def step(self, action):
         self.total_steps += 1
-        reward = 0
+        
+        # --- THE EXISTENCE TAX ---
+        # He loses a tiny bit of score every step.
+        # This forces him to keep moving to "break even".
+        reward = -0.1 
+        
         terminated = False
         bonk_msg = ""
         cookie_msg = ""
@@ -89,7 +82,6 @@ class NuzlockeEnv(gym.Env):
         is_catchable = not is_trainer and not is_dupe and not route_cleared
 
         # --- B. GUARDIAN LOGIC ---
-        # 1. ITEM POLICE
         if in_battle and action == 4 and battle_menu == 1:
             if is_trainer:
                 action = 5 
@@ -105,7 +97,7 @@ class NuzlockeEnv(gym.Env):
                 reward += 5 
                 cookie_msg = "Good throw attempt!"
 
-        # 2. POTION POLICE
+        # Potion Check
         curr_hp = (mem[0xD16C] << 8) + mem[0xD16D]
         if in_battle and curr_hp > self.last_hp and self.last_hp != 0:
             reward -= 50
@@ -122,7 +114,6 @@ class NuzlockeEnv(gym.Env):
         for _ in range(5): self.pyboy.tick()
 
         # --- D. POST-ACTION CHECKS ---
-        # 1. EFFECTIVENESS
         if in_battle:
             eff = mem[0xD05D]
             if eff > 10:
@@ -134,8 +125,7 @@ class NuzlockeEnv(gym.Env):
                 mem[0xD05D] = 10
                 bonk_msg = "Not Very Effective..."
 
-        # 2. GAME OVER CHECK (THE NEW FIX)
-        # We scan the WHOLE party. If everyone is dead or overleveled, RESET.
+        # GAME OVER CHECK
         valid_mons_left = self.check_party_status()
         if valid_mons_left == 0:
             terminated = True
