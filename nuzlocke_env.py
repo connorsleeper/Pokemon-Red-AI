@@ -9,10 +9,9 @@ class NuzlockeEnv(gym.Env):
         super(NuzlockeEnv, self).__init__()
         
         # 1. EMULATOR SETUP
-        # We set speed to 0 (Unlimited) because PyGame will handle the 60FPS lock.
-        # This prevents the "Double Throttle" lag.
-        self.pyboy = PyBoy(rom_path, window="null") 
-        self.pyboy.set_emulation_speed(0)
+        # window="SDL2" enables AUDIO and HARDWARE TIMING (1x Speed)
+        self.pyboy = PyBoy(rom_path, window="SDL2") 
+        self.pyboy.set_emulation_speed(1)
         
         with open(state_path, "rb") as f:
             self.pyboy.load_state(f)
@@ -21,7 +20,6 @@ class NuzlockeEnv(gym.Env):
         self.observation_space = spaces.Box(low=0, high=255, shape=(10,), dtype=np.uint8)
         
         # --- PHYSICAL APPEARANCE DATABASE (1-151) ---
-        # Format: ID: (Name, Physical_Emoji, Type)
         self.ROM_DB = {
             153: ("Bulbasaur", "🐸", "GRS"), 154: ("Ivysaur", "🐸", "GRS"), 155: ("Venusaur", "🌺", "GRS"),
             176: ("Charmander", "🦎", "FIR"), 178: ("Charmeleon", "🦎", "FIR"), 180: ("Charizard", "🐉", "FIR"),
@@ -106,8 +104,6 @@ class NuzlockeEnv(gym.Env):
         self.cookies = 0
         self.bonks = 0
         self.last_brain_update = 0
-        
-        # Telemetry
         self.map_id = 0
         self.x = 0
         self.y = 0
@@ -126,7 +122,6 @@ class NuzlockeEnv(gym.Env):
 
     def render(self):
         try:
-            # FORCE COPY + SHAPE CHECK + GUARDIAN
             raw = np.array(self.pyboy.screen.ndarray, dtype=np.uint8, copy=True, order='C')
             if raw.shape == (144, 160, 4): return raw[:, :, :3]
             if raw.shape == (144, 160, 3): return raw
@@ -144,7 +139,6 @@ class NuzlockeEnv(gym.Env):
         return name if name else "NEW"
 
     def get_objective(self):
-        # Heuristic Logic
         if self.badges == 0: return "DELIVER PARCEL -> BROCK"
         if self.badges == 1: return "MT MOON -> MISTY"
         if self.badges == 2: return "SS ANNE -> SURGE"
@@ -155,7 +149,6 @@ class NuzlockeEnv(gym.Env):
     def update_data(self):
         mem = self.pyboy.memory
         
-        # Telemetry
         self.map_id = mem[0xD35E]
         self.x = mem[0xD362]
         self.y = mem[0xD361]
@@ -175,14 +168,10 @@ class NuzlockeEnv(gym.Env):
         for i in range(party_count):
             base = 0xD16B + (i * 44)
             species = mem[base]
-            
-            # --- INTERNAL ID LOOKUP ---
             name, emoji, type_label = self.ROM_DB.get(species, ("UNK", "❓", "???"))
             
-            # --- HP CALCULATION FIX ---
-            # HP is at +1 and +2. Max HP is at +34 (0x22) and +35 (0x23)
             hp = (mem[base + 1] << 8) + mem[base + 2]
-            max_hp = (mem[base + 0x22] << 8) + mem[base + 0x23] # FIXED OFFSET
+            max_hp = (mem[base + 0x22] << 8) + mem[base + 0x23] 
             lvl = mem[base + 0x21]
             nickname = self.get_ram_nickname(i)
             current_total_hp += hp
@@ -192,7 +181,6 @@ class NuzlockeEnv(gym.Env):
                 self.last_cookie_step = self.total_steps
             self.last_party_levels[i] = lvl
             
-            # GRAVEYARD CHECK
             if hp == 0 and max_hp > 0:
                  death_msg = f"{nickname} ({emoji})"
                  if death_msg not in self.graveyard:
@@ -217,7 +205,9 @@ class NuzlockeEnv(gym.Env):
              self.bonks += 1
 
     def handle_nicknaming(self):
-        self.pyboy.button('a'); self.pyboy.tick(50); self.pyboy.button_release('a')
+        # Even the nickname handler must FORCE inputs
+        for _ in range(50): self.pyboy.button('a'); self.pyboy.tick()
+        self.pyboy.button_release('a')
         self.cookies += 5
         self.last_cookie_step = self.total_steps
 
@@ -226,11 +216,19 @@ class NuzlockeEnv(gym.Env):
         btn_map = ['UP','DOWN','LEFT','RIGHT','A','B','START','SELECT']
         btn = btn_map[action]
         
-        self.pyboy.button(btn.lower())
-        # Ticking strictly 1 frame per action helps PyGame maintain 60FPS
-        self.pyboy.tick() 
+        # --- THE "FORCE FEED" METHOD ---
+        # With SDL2 enabled, the window tries to clear inputs every frame.
+        # We must re-assert the button press on EVERY tick to override it.
+        
+        # 1. HOLD PHASE (16 frames)
+        for _ in range(16):
+            self.pyboy.button(btn.lower()) # Re-press button EVERY frame
+            self.pyboy.tick() 
+        
+        # 2. RELEASE PHASE (16 frames)
         self.pyboy.button_release(btn.lower())
-        self.pyboy.tick()
+        for _ in range(16):
+            self.pyboy.tick() # Just wait
         
         log_entry = f"{self.total_steps} | M{self.map_id} | ({self.x},{self.y}) | {btn}"
         self.log_history.append(log_entry)
