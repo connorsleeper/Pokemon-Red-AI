@@ -12,6 +12,7 @@
     <Name>Gen1_RedBlue</Name>
     <RootNamespace>Gen1_RedBlue</RootNamespace>
     <InterpreterId>Global|VisualStudio|pokeai</InterpreterId>
+    <IsWindowsApplication>True</IsWindowsApplication>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
     <DebugSymbols>true</DebugSymbols>
