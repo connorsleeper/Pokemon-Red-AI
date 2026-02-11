@@ -9,7 +9,6 @@ class NuzlockeEnv(gym.Env):
         super(NuzlockeEnv, self).__init__()
         
         # 1. EMULATOR SETUP
-        # window="SDL2" enables AUDIO and HARDWARE TIMING (1x Speed)
         self.pyboy = PyBoy(rom_path, window="SDL2") 
         self.pyboy.set_emulation_speed(1)
         
@@ -19,7 +18,10 @@ class NuzlockeEnv(gym.Env):
         self.action_space = spaces.Discrete(8)
         self.observation_space = spaces.Box(low=0, high=255, shape=(10,), dtype=np.uint8)
         
-        # --- PHYSICAL APPEARANCE DATABASE (1-151) ---
+        # --- RENDER HOOK ---
+        self.render_callback = None
+        
+        # --- PHYSICAL APPEARANCE DATABASE ---
         self.ROM_DB = {
             153: ("Bulbasaur", "🐸", "GRS"), 154: ("Ivysaur", "🐸", "GRS"), 155: ("Venusaur", "🌺", "GRS"),
             176: ("Charmander", "🦎", "FIR"), 178: ("Charmeleon", "🦎", "FIR"), 180: ("Charizard", "🐉", "FIR"),
@@ -98,27 +100,28 @@ class NuzlockeEnv(gym.Env):
             131: ("Mewtwo", "🧬", "PSY"), 21: ("Mew", "🧬", "PSY")
         }
         
-        # --- STATE ---
         self.party_info = [] 
         self.total_steps = 0
         self.cookies = 0
         self.bonks = 0
         self.last_brain_update = 0
         self.map_id = 0
-        self.x = 0
-        self.y = 0
+        self.x, self.y = 0, 0
         self.badges = 0
         self.current_objective = "OAK'S PARCEL"
         
         self.graveyard = deque(maxlen=8)
         self.log_history = deque(maxlen=20)
-        
         self.last_party_count = 0
         self.last_party_levels = [0] * 6
         self.last_party_species = [0] * 6
         self.last_total_hp = 0
         self.last_cookie_step = 0
         self.hunger_threshold = 1000
+
+    def set_render_callback(self, callback):
+        """Allows the GUI to update while the emulator holds buttons."""
+        self.render_callback = callback
 
     def render(self):
         try:
@@ -148,7 +151,6 @@ class NuzlockeEnv(gym.Env):
 
     def update_data(self):
         mem = self.pyboy.memory
-        
         self.map_id = mem[0xD35E]
         self.x = mem[0xD362]
         self.y = mem[0xD361]
@@ -205,8 +207,10 @@ class NuzlockeEnv(gym.Env):
              self.bonks += 1
 
     def handle_nicknaming(self):
-        # Even the nickname handler must FORCE inputs
-        for _ in range(50): self.pyboy.button('a'); self.pyboy.tick()
+        for _ in range(50):
+            self.pyboy.button('a')
+            self.pyboy.tick()
+            if self.render_callback: self.render_callback()
         self.pyboy.button_release('a')
         self.cookies += 5
         self.last_cookie_step = self.total_steps
@@ -216,19 +220,20 @@ class NuzlockeEnv(gym.Env):
         btn_map = ['UP','DOWN','LEFT','RIGHT','A','B','START','SELECT']
         btn = btn_map[action]
         
-        # --- THE "FORCE FEED" METHOD ---
-        # With SDL2 enabled, the window tries to clear inputs every frame.
-        # We must re-assert the button press on EVERY tick to override it.
-        
-        # 1. HOLD PHASE (16 frames)
+        # --- THE FIX: RENDER WHILE HOLDING ---
+        # 16 Frames Hold (0.25s)
         for _ in range(16):
-            self.pyboy.button(btn.lower()) # Re-press button EVERY frame
-            self.pyboy.tick() 
+            self.pyboy.button(btn.lower())
+            self.pyboy.tick()
+            # ** FORCE GUI UPDATE **
+            if self.render_callback: self.render_callback()
         
-        # 2. RELEASE PHASE (16 frames)
+        # 16 Frames Cooldown (0.25s)
         self.pyboy.button_release(btn.lower())
         for _ in range(16):
-            self.pyboy.tick() # Just wait
+            self.pyboy.tick()
+            # ** FORCE GUI UPDATE **
+            if self.render_callback: self.render_callback()
         
         log_entry = f"{self.total_steps} | M{self.map_id} | ({self.x},{self.y}) | {btn}"
         self.log_history.append(log_entry)

@@ -48,15 +48,105 @@ def main():
         model = PPO('MlpPolicy', env, verbose=0)
         brain_status = "CREATED NEW (v.0)"
 
+    # --- THE RENDER CALLBACK ---
+    # This function is sent to the emulator so it can force a redraw 
+    # whenever it wants (even inside loops)
+    def draw_frame():
+        # Process events so the window doesn't freeze
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                env.close()
+                pygame.quit()
+                sys.exit()
+
+        screen.fill(COLOR_BG)
+
+        # 1. HEADER
+        header_text = f"COOKIES: {env.cookies}   BONKS: {env.bonks}   STEPS: {env.total_steps}   LAST REV: {env.last_brain_update}   OBJ: {env.current_objective}"
+        header_surf = font_head.render(header_text, True, COLOR_TEXT_MAIN)
+        screen.blit(header_surf, (WINDOW_WIDTH//2 - header_surf.get_width()//2, 20))
+        
+        # 2. GAME AREA
+        raw_screen = env.render()
+        if raw_screen.shape == (144, 160, 3):
+            game_surface = pygame.surfarray.make_surface(raw_screen.swapaxes(0, 1))
+            game_surface = pygame.transform.scale(game_surface, (160 * GAME_SCALE, 144 * GAME_SCALE))
+            game_x = (WINDOW_WIDTH - (160 * GAME_SCALE)) // 2
+            game_y = 60
+            pygame.draw.rect(screen, COLOR_BORDER, (game_x-4, game_y-4, (160*GAME_SCALE)+8, (144*GAME_SCALE)+8))
+            screen.blit(game_surface, (game_x, game_y))
+
+        # 3. LEFT PANEL
+        panel_y = 60
+        pygame.draw.rect(screen, COLOR_PANEL, (20, panel_y, 300, 500))
+        pygame.draw.rect(screen, COLOR_ACCENT, (20, panel_y, 300, 500), 1)
+        title_surf = font_head.render("ACTIVE TEAM", True, COLOR_ACCENT)
+        screen.blit(title_surf, (30, panel_y + 10))
+        
+        y_offset = panel_y + 50
+        for mon in env.party_info:
+            line1 = f"{mon['emoji']} {mon['name']} (L{mon['lvl']})"
+            screen.blit(font_emoji.render(line1, True, COLOR_TEXT_MAIN), (30, y_offset))
+            line2 = f"{mon['species']} [{mon['type']}]"
+            screen.blit(font_small.render(line2, True, (150, 150, 150)), (30, y_offset + 20))
+            bar_y = y_offset + 40
+            pygame.draw.rect(screen, (40, 40, 40), (30, bar_y, 200, 8)) 
+            fill_width = int(200 * mon['pct'])
+            hp_color = COLOR_HP_HIGH if mon['pct'] > 0.5 else COLOR_HP_LOW
+            pygame.draw.rect(screen, hp_color, (30, bar_y, fill_width, 8)) 
+            hp_txt = f"{mon['hp']}/{mon['max_hp']}"
+            screen.blit(font_small.render(hp_txt, True, (200,200,200)), (240, bar_y - 5))
+            y_offset += 70
+
+        # 4. RIGHT PANEL
+        pygame.draw.rect(screen, COLOR_PANEL, (WINDOW_WIDTH - 320, panel_y, 300, 500))
+        pygame.draw.rect(screen, COLOR_ACCENT, (WINDOW_WIDTH - 320, panel_y, 300, 500), 1)
+        log_title = font_head.render("TERMINAL LOG", True, COLOR_ACCENT)
+        screen.blit(log_title, (WINDOW_WIDTH - 310, panel_y + 10))
+        log_y = panel_y + 50
+        for i, log in enumerate(list(env.log_history)[::-1]):
+            if i > 10: break 
+            color = COLOR_ACCENT if "***" in log else COLOR_TEXT_LOG
+            log_surf = font_mono.render(log, True, color)
+            screen.blit(log_surf, (WINDOW_WIDTH - 310, log_y))
+            log_y += 18
+
+        # GRAVEYARD
+        grave_y = panel_y + 350
+        pygame.draw.line(screen, (100, 100, 100), (WINDOW_WIDTH - 310, grave_y), (WINDOW_WIDTH - 30, grave_y), 1)
+        grave_title = font_head.render("GRAVEYARD", True, (200, 50, 50))
+        screen.blit(grave_title, (WINDOW_WIDTH - 310, grave_y + 5))
+        gy_offset = grave_y + 30
+        for dead_mon in env.graveyard:
+            screen.blit(font_emoji.render(f"✝ {dead_mon}", True, (150, 150, 150)), (WINDOW_WIDTH - 310, gy_offset))
+            gy_offset += 20
+
+        # 5. BOTTOM PANEL
+        bottom_box_y = game_y + (144*GAME_SCALE) + 10
+        bottom_box_h = 720 - bottom_box_y - 10
+        bottom_box_w = (WINDOW_WIDTH - 320) - 320 - 40 
+        bottom_box_x = 340 
+        pygame.draw.rect(screen, COLOR_PANEL, (bottom_box_x, bottom_box_y, bottom_box_w, bottom_box_h))
+        pygame.draw.rect(screen, (50, 50, 100), (bottom_box_x, bottom_box_y, bottom_box_w, bottom_box_h), 1)
+        
+        info_title = font_head.render("NEURAL NET DIAGNOSTICS", True, (100, 200, 255))
+        screen.blit(info_title, (bottom_box_x + 10, bottom_box_y + 10))
+        status_txt = f"STATUS: {brain_status} | MODEL: PPO (MlpPolicy)"
+        screen.blit(font_small.render(status_txt, True, COLOR_TEXT_MAIN), (bottom_box_x + 10, bottom_box_y + 40))
+        learn_txt = f"LEARNING RATE: Adaptive | BATCH: 2048 | GAMMA: 0.99"
+        screen.blit(font_small.render(learn_txt, True, COLOR_TEXT_MAIN), (bottom_box_x + 10, bottom_box_y + 60))
+
+        pygame.display.flip()
+
+    # Register the callback
+    env.set_render_callback(draw_frame)
+
     running = True
     obs, _ = env.reset()
     
     try:
         while running:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    running = False
-
+            # We still need a main loop to drive the AI decisions
             action, _ = model.predict(obs)
             obs, reward, done, trunc, info = env.step(action)
             
@@ -64,88 +154,6 @@ def main():
                 env.trigger_brain_review()
                 model.learn(total_timesteps=2048, reset_num_timesteps=False)
                 model.save("models/PPO/nuzlocke_live")
-
-            screen.fill(COLOR_BG)
-
-            # HEADER
-            header_text = f"COOKIES: {env.cookies}   BONKS: {env.bonks}   STEPS: {env.total_steps}   LAST REV: {env.last_brain_update}   OBJ: {env.current_objective}"
-            header_surf = font_head.render(header_text, True, COLOR_TEXT_MAIN)
-            screen.blit(header_surf, (WINDOW_WIDTH//2 - header_surf.get_width()//2, 20))
-            
-            # GAME AREA
-            raw_screen = env.render()
-            if raw_screen.shape == (144, 160, 3):
-                game_surface = pygame.surfarray.make_surface(raw_screen.swapaxes(0, 1))
-                game_surface = pygame.transform.scale(game_surface, (160 * GAME_SCALE, 144 * GAME_SCALE))
-                game_x = (WINDOW_WIDTH - (160 * GAME_SCALE)) // 2
-                game_y = 60
-                pygame.draw.rect(screen, COLOR_BORDER, (game_x-4, game_y-4, (160*GAME_SCALE)+8, (144*GAME_SCALE)+8))
-                screen.blit(game_surface, (game_x, game_y))
-
-            # LEFT PANEL
-            panel_y = 60
-            pygame.draw.rect(screen, COLOR_PANEL, (20, panel_y, 300, 500))
-            pygame.draw.rect(screen, COLOR_ACCENT, (20, panel_y, 300, 500), 1)
-            title_surf = font_head.render("ACTIVE TEAM", True, COLOR_ACCENT)
-            screen.blit(title_surf, (30, panel_y + 10))
-            
-            y_offset = panel_y + 50
-            for mon in env.party_info:
-                line1 = f"{mon['emoji']} {mon['name']} (L{mon['lvl']})"
-                screen.blit(font_emoji.render(line1, True, COLOR_TEXT_MAIN), (30, y_offset))
-                line2 = f"{mon['species']} [{mon['type']}]"
-                screen.blit(font_small.render(line2, True, (150, 150, 150)), (30, y_offset + 20))
-                
-                bar_y = y_offset + 40
-                pygame.draw.rect(screen, (40, 40, 40), (30, bar_y, 200, 8)) 
-                fill_width = int(200 * mon['pct'])
-                hp_color = COLOR_HP_HIGH if mon['pct'] > 0.5 else COLOR_HP_LOW
-                pygame.draw.rect(screen, hp_color, (30, bar_y, fill_width, 8)) 
-                hp_txt = f"{mon['hp']}/{mon['max_hp']}"
-                screen.blit(font_small.render(hp_txt, True, (200,200,200)), (240, bar_y - 5))
-                y_offset += 70
-
-            # RIGHT PANEL
-            pygame.draw.rect(screen, COLOR_PANEL, (WINDOW_WIDTH - 320, panel_y, 300, 500))
-            pygame.draw.rect(screen, COLOR_ACCENT, (WINDOW_WIDTH - 320, panel_y, 300, 500), 1)
-            log_title = font_head.render("TERMINAL LOG", True, COLOR_ACCENT)
-            screen.blit(log_title, (WINDOW_WIDTH - 310, panel_y + 10))
-            
-            log_y = panel_y + 50
-            for i, log in enumerate(list(env.log_history)[::-1]):
-                if i > 10: break 
-                color = COLOR_ACCENT if "***" in log else COLOR_TEXT_LOG
-                log_surf = font_mono.render(log, True, color)
-                screen.blit(log_surf, (WINDOW_WIDTH - 310, log_y))
-                log_y += 18
-
-            grave_y = panel_y + 350
-            pygame.draw.line(screen, (100, 100, 100), (WINDOW_WIDTH - 310, grave_y), (WINDOW_WIDTH - 30, grave_y), 1)
-            grave_title = font_head.render("GRAVEYARD", True, (200, 50, 50))
-            screen.blit(grave_title, (WINDOW_WIDTH - 310, grave_y + 5))
-            gy_offset = grave_y + 30
-            for dead_mon in env.graveyard:
-                screen.blit(font_emoji.render(f"✝ {dead_mon}", True, (150, 150, 150)), (WINDOW_WIDTH - 310, gy_offset))
-                gy_offset += 20
-
-            # BOTTOM PANEL
-            bottom_box_y = game_y + (144*GAME_SCALE) + 10
-            bottom_box_h = 720 - bottom_box_y - 10
-            bottom_box_w = (WINDOW_WIDTH - 320) - 320 - 40 
-            bottom_box_x = 340 
-            pygame.draw.rect(screen, COLOR_PANEL, (bottom_box_x, bottom_box_y, bottom_box_w, bottom_box_h))
-            pygame.draw.rect(screen, (50, 50, 100), (bottom_box_x, bottom_box_y, bottom_box_w, bottom_box_h), 1)
-            
-            info_title = font_head.render("NEURAL NET DIAGNOSTICS", True, (100, 200, 255))
-            screen.blit(info_title, (bottom_box_x + 10, bottom_box_y + 10))
-            status_txt = f"STATUS: {brain_status} | MODEL: PPO (MlpPolicy)"
-            screen.blit(font_small.render(status_txt, True, COLOR_TEXT_MAIN), (bottom_box_x + 10, bottom_box_y + 40))
-            learn_txt = f"LEARNING RATE: Adaptive | BATCH: 2048 | GAMMA: 0.99"
-            screen.blit(font_small.render(learn_txt, True, COLOR_TEXT_MAIN), (bottom_box_x + 10, bottom_box_y + 60))
-
-            pygame.display.flip()
-            # UNCAP PYGAME FPS (LET PYBOY HANDLE TIMING)
-            clock.tick(0) 
 
     finally:
         print(">> GUI: Saving Brain before shutdown...")
